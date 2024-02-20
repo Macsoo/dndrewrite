@@ -11,6 +11,8 @@ struct Scale(f32);
 #[derive(Resource)]
 struct MouseLastPosition(Vec2);
 
+//Testing GPG signing
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
