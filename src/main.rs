@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Deref;
 use bevy::asset::{LoadedFolder, LoadState};
 use bevy::prelude::*;
@@ -20,8 +21,69 @@ struct Scale(f32);
 #[derive(Resource, Default)]
 struct MouseLastPosition(Vec2);
 
+type TileColors = HashMap<String, Vec<Handle<Image>>>;
+
+type TileVariants = HashMap<String, TileColors>;
+
 #[derive(Resource, Default)]
-struct TileHandles(Vec<Handle<Image>>);
+struct TileTextures(HashMap<String, TileVariants>);
+
+impl TileTextures {
+    fn push(
+        &mut self,
+        tile_type: Cow<str>,
+        tile_variant: Cow<str>,
+        tile_color: Cow<str>,
+        handles: Vec<Handle<Image>>,
+    ) {
+        let tile_variants = if let Some(tv) = self.0.get_mut(&*tile_type) {
+            tv
+        } else {
+            self.0.entry(tile_type.into_owned())
+                .insert(HashMap::new())
+                .into_mut()
+        };
+        let tile_colors = if let Some(tc) = tile_variants.get_mut(&*tile_variant) {
+            tc
+        } else {
+            tile_variants.entry(tile_variant.into_owned())
+                .insert(HashMap::new())
+                .into_mut()
+        };
+        tile_colors.insert(tile_color.into_owned(), handles);
+    }
+
+    fn get_tile_types(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    fn get_tile_variants(&self, tile_type: &str) -> Option<impl Iterator<Item = &str>> {
+        self.0.get(tile_type).map(HashMap::keys).map(|x|x.map(String::as_str))
+    }
+
+    fn get_tile_colors(
+        &self,
+        tile_type: &str,
+        tile_variants: &str,
+    ) -> Option<impl Iterator<Item = &str>> {
+        self.0.get(tile_type)
+            .and_then(|hm| hm.get(tile_variants))
+            .map(HashMap::keys)
+            .map(|x|x.map(String::as_str))
+    }
+
+    fn get_tile_textures(
+        &self,
+        tile_type: &str,
+        tile_variants: &str,
+        tile_color: &str,
+    ) -> Option<&[Handle<Image>]> {
+        self.0.get(tile_type)
+            .and_then(|hm| hm.get(tile_variants))
+            .and_then(|hm| hm.get(tile_color))
+            .map(Vec::as_slice)
+    }
+}
 
 #[derive(Resource, Default)]
 struct FoldersLoading(Vec<(String, Handle<LoadedFolder>)>);
@@ -55,18 +117,23 @@ fn load(
 fn check_loading(
     mut asset_event: EventReader<AssetEvent<LoadedFolder>>,
     mut folders_loading: ResMut<FoldersLoading>,
-    mut tiles: ResMut<TileHandles>,
-    loaded_folders: Res<Assets<LoadedFolder>>,
+    mut tile_textures: ResMut<TileTextures>,
+    mut loaded_folders: ResMut<Assets<LoadedFolder>>,
     mut next_state: ResMut<NextState<AppStates>>,
 ) {
     for ev in asset_event.read() {
         let AssetEvent::LoadedWithDependencies { id } = ev else { continue };
-        let loaded_folder = loaded_folders.get(*id).unwrap();
+        let loaded_folder = loaded_folders.remove(*id).unwrap();
         let (name, _) = folders_loading.remove(id);
         info!("Loaded folder '{}'.", name);
-        for handle in &loaded_folder.handles {
-            tiles.0.push(handle.clone().typed());
-        }
+        let Some(name) = name.strip_prefix("pointy.") else { continue };
+        let Some((tile_name, color)) = name.split_once('.') else { continue };
+        let Some((tile_type, tile_variant)) = tile_name.rsplit_once('_') else { continue };
+        let handles: Vec<Handle<Image>> = loaded_folder.handles
+            .into_iter()
+            .map(UntypedHandle::typed)
+            .collect();
+        tile_textures.push(tile_type.into(), tile_variant.into(), color.into(), handles);
         if folders_loading.0.is_empty() {
             next_state.set(AppStates::Loaded);
         }
@@ -75,21 +142,24 @@ fn check_loading(
 
 fn setup(
     mut commands: Commands,
-    tiles: Res<TileHandles>,
+    tiles: Res<TileTextures>,
 ) {
     let layout = HexLayout {
-        hex_size: Vec2::splat(420. * 3f32.sqrt() / 2.),
+        hex_size: Vec2::splat(105. * 3f32.sqrt()),
         orientation: HexOrientation::Pointy,
         ..default()
     };
-    info!("The len is: {}", tiles.0.len());
-    let _ = Hex::default().spiral_range(0..100)
-        .take(tiles.0.len())
+    let Some(handle) = tiles.get_tile_textures(
+        "oak_forest",
+        "mountain",
+        "winter"
+    ).and_then(|x| x.first()) else { return };
+    let _ = Hex::default().spiral_range(0..3)
         .enumerate()
         .map(|(i, hex)| {
             let pos = layout.hex_to_world_pos(hex);
             commands.spawn(SpriteBundle {
-                texture: tiles.0.get(i).unwrap().clone(),
+                texture: handle.clone(),
                 transform: Transform::from_xyz(pos.x, pos.y, 0.),
                 ..default()
             });
@@ -175,7 +245,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .init_resource::<Scale>()
         .init_resource::<MouseLastPosition>()
-        .init_resource::<TileHandles>()
+        .init_resource::<TileTextures>()
         .init_resource::<FoldersLoading>()
         .add_state::<AppStates>()
         .add_systems(OnEnter(AppStates::Loading), load)
