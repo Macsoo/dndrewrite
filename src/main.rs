@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::ops::Deref;
+use bevy::app::AppExit;
 use bevy::asset::{LoadedFolder, LoadState};
 use bevy::prelude::*;
 use bevy::input::mouse::MouseWheel;
@@ -238,23 +239,23 @@ fn move_camera(
     mut cameras: Query<(&mut Transform, &Camera)>,
     time: Res<Time>,
     focus: Res<Focus>,
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
 ) {
     for (mut transform, camera) in cameras.iter_mut() {
         let RenderTarget::Window(window) = camera.target else { continue; };
         let WindowRef::Entity(entity) = window else { continue; };
         if focus.0 != Some(entity) { continue; }
         let vel = 10_000. * time.delta().as_secs_f32();
-        if keys.pressed(KeyCode::W) {
+        if keys.pressed(KeyCode::KeyW) {
             transform.translation.y += vel;
         }
-        if keys.pressed(KeyCode::A) {
+        if keys.pressed(KeyCode::KeyA) {
             transform.translation.x -= vel;
         }
-        if keys.pressed(KeyCode::S) {
+        if keys.pressed(KeyCode::KeyS) {
             transform.translation.y -= vel;
         }
-        if keys.pressed(KeyCode::D) {
+        if keys.pressed(KeyCode::KeyD) {
             transform.translation.x += vel;
         }
     }
@@ -287,7 +288,7 @@ fn zoom(
 
 fn map_drag(
     mut mouse_movement: EventReader<CursorMoved>,
-    mouse_button: Res<Input<MouseButton>>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
     mut cameras: Query<(&mut Transform, &Camera)>,
     mut last_pos: ResMut<MouseLastPosition>,
     focus: Res<Focus>,
@@ -309,7 +310,7 @@ fn map_drag(
 }
 
 fn detect_press(
-    mouse_button: Res<Input<MouseButton>>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
     mut last_pos: ResMut<MouseLastPosition>,
     windows: Query<&Window>,
 ) {
@@ -319,6 +320,15 @@ fn detect_press(
                 last_pos.0 = pos;
             }
         }
+    }
+}
+
+fn exit_on_esc(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut exit_event: EventWriter<AppExit>,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        exit_event.send(AppExit);
     }
 }
 
@@ -334,7 +344,7 @@ fn main() {
         .init_resource::<Textures>()
         .init_resource::<FoldersLoading>()
         .init_resource::<Focus>()
-        .add_state::<AppStates>()
+        .init_state::<AppStates>()
         .add_systems(OnEnter(AppStates::Loading), load)
         .add_systems(Update, check_loading.run_if(in_state(AppStates::Loading)))
         .add_systems(OnEnter(AppStates::Loaded), setup)
@@ -344,8 +354,7 @@ fn main() {
             (detect_press, map_drag).chain(),
         ).run_if(in_state(AppStates::Loaded)))
         .add_systems(Update, (
-            bevy::window::close_on_esc,
-            bevy::window::exit_on_all_closed,
+            exit_on_esc,
             focus_checker,
         ).run_if(in_state(AppStates::Loaded)))
         .run();
