@@ -43,6 +43,11 @@ type TileVariants = BTreeMap<String, TileColors>;
 #[derive(Resource, Default)]
 struct Textures {
     location_textures: Vec<Handle<Image>>,
+    marker_textures: Vec<Handle<Image>>,
+    flair_textures: Vec<Handle<Image>>,
+    path_textures: Vec<Handle<Image>>,
+    river_textures: Vec<Handle<Image>>,
+    road_textures: Vec<Handle<Image>>,
     figure_textures: Vec<Handle<Image>>,
     tile_textures: BTreeMap<String, TileVariants>,
 }
@@ -158,7 +163,18 @@ fn check_loading(
                 .into_iter()
                 .map(UntypedHandle::typed)
                 .collect();
-            textures.push_tile(tile_type.into(), tile_variant.into(), color.into(), handles);
+            if tile_type == "overlay" {
+                match tile_variant {
+                    "flairs" => textures.flair_textures = handles,
+                    "markers" => textures.marker_textures = handles,
+                    "paths" => textures.path_textures = handles,
+                    "rivers" => textures.river_textures = handles,
+                    "roads" => textures.road_textures = handles,
+                    tt => warn!("Unknown overlay variant: {}", tt)
+                }
+            } else {
+                textures.push_tile(tile_type.into(), tile_variant.into(), color.into(), handles);
+            }
         } else {
             let Some(name) = name.strip_prefix("overlay_")
                 .and_then(|s| s.strip_suffix(".standard_full")) else { continue; };
