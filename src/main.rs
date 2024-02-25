@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 use bevy::app::AppExit;
 use bevy::asset::{LoadedFolder, LoadState};
@@ -18,21 +19,32 @@ enum AppStates {
     Loaded,
 }
 
+#[derive(States, PartialEq, Eq, Debug, Clone, Hash, Default)]
+enum AdminEditor {
+    #[default]
+    NotLoaded,
+    Choose,
+    ChooseTileType,
+    ChooseTileVariant,
+    ChooseTileColor,
+    PlaceTile,
+}
+
 #[derive(Resource, Default)]
 struct Scale(f32);
 
 #[derive(Resource, Default)]
 struct MouseLastPosition(Vec2);
 
-type TileColors = HashMap<String, Vec<Handle<Image>>>;
+type TileColors = BTreeMap<String, Vec<Handle<Image>>>;
 
-type TileVariants = HashMap<String, TileColors>;
+type TileVariants = BTreeMap<String, TileColors>;
 
 #[derive(Resource, Default)]
 struct Textures {
     location_textures: Vec<Handle<Image>>,
     figure_textures: Vec<Handle<Image>>,
-    tile_textures: HashMap<String, TileVariants>,
+    tile_textures: BTreeMap<String, TileVariants>,
 }
 
 impl Textures {
@@ -46,16 +58,14 @@ impl Textures {
         let tile_variants = if let Some(tv) = self.tile_textures.get_mut(&*tile_type) {
             tv
         } else {
-            self.tile_textures.entry(tile_type.into_owned())
-                .insert(HashMap::new())
-                .into_mut()
+            self.tile_textures.insert(tile_type.clone().into_owned(), BTreeMap::new());
+            self.tile_textures.get_mut(&*tile_type).unwrap()
         };
         let tile_colors = if let Some(tc) = tile_variants.get_mut(&*tile_variant) {
             tc
         } else {
-            tile_variants.entry(tile_variant.into_owned())
-                .insert(HashMap::new())
-                .into_mut()
+            tile_variants.insert(tile_variant.clone().into_owned(), BTreeMap::new());
+            tile_variants.get_mut(&*tile_variant).unwrap()
         };
         tile_colors.insert(tile_color.into_owned(), handles);
     }
@@ -65,7 +75,7 @@ impl Textures {
     }
 
     fn get_tile_variants(&self, tile_type: &str) -> Option<impl Iterator<Item=&str>> {
-        self.tile_textures.get(tile_type).map(HashMap::keys).map(|x| x.map(String::as_str))
+        self.tile_textures.get(tile_type).map(BTreeMap::keys).map(|x| x.map(String::as_str))
     }
 
     fn get_tile_colors(
@@ -75,7 +85,7 @@ impl Textures {
     ) -> Option<impl Iterator<Item=&str>> {
         self.tile_textures.get(tile_type)
             .and_then(|hm| hm.get(tile_variants))
-            .map(HashMap::keys)
+            .map(BTreeMap::keys)
             .map(|x| x.map(String::as_str))
     }
 
@@ -176,9 +186,296 @@ fn check_loading(
     }
 }
 
-fn setup(
+#[derive(Resource, Default, Debug)]
+struct UITracker {
+    admin_bar: Option<Entity>,
+    back_button: Option<Entity>,
+    tile_button: Option<Entity>,
+    tile_type_buttons: Option<Vec<Entity>>,
+    chosen_tile_type: Option<String>,
+    tile_variant_buttons: Option<Vec<Entity>>,
+    chosen_tile_variant: Option<String>,
+    tile_color_buttons: Option<Vec<Entity>>,
+    chosen_tile_color: Option<String>,
+    tile_textures: Option<Vec<Entity>>,
+}
+
+impl UITracker {
+    fn back_button(&mut self, commands: &mut Commands) {
+        let Some(ui) = self.admin_bar else { return };
+        let back = commands.spawn((
+            TextBundle::from_section(
+                "<=",
+                TextStyle {
+                    font_size: 24.,
+                    ..default()
+                }
+            ), Interaction::default()
+        )).id();
+        commands.entity(ui).push_children(&[back]);
+        self.back_button = Some(back);
+    }
+
+    fn despawn_back_button(&mut self, commands: &mut Commands) {
+        let Some(back) = self.back_button.take() else { return };
+        commands.entity(back).despawn_recursive();
+    }
+}
+
+fn button_listener(
+    interaction_query: Query<(
+        Entity,
+        &Interaction,
+    ), (Changed<Interaction>, With<Node>)>,
+    textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+    current_state: Res<State<AdminEditor>>,
+    mut next_state: ResMut<NextState<AdminEditor>>,
+) {
+    for (entity, interaction) in &interaction_query {
+        if *interaction != Interaction::Pressed { continue }
+        if ui_tracker.back_button == Some(entity) {
+            let next = match current_state.get() {
+                AdminEditor::NotLoaded => None,
+                AdminEditor::Choose => None,
+                AdminEditor::ChooseTileType => Some(AdminEditor::Choose),
+                AdminEditor::ChooseTileVariant => Some(AdminEditor::ChooseTileType),
+                AdminEditor::ChooseTileColor => Some(AdminEditor::ChooseTileVariant),
+                AdminEditor::PlaceTile => Some(AdminEditor::ChooseTileColor),
+            };
+            if let Some(next) = next {
+                next_state.set(next);
+            }
+        } else if ui_tracker.tile_button == Some(entity) {
+            next_state.set(AdminEditor::ChooseTileType);
+        } else if let Some(n) = ui_tracker.tile_type_buttons.as_ref()
+            .and_then(|b| b.iter().position(|b| *b == entity)) {
+            let Some(tile_type) = textures.tile_textures.keys().nth(n) else { continue };
+            ui_tracker.chosen_tile_type = Some(tile_type.clone());
+            next_state.set(AdminEditor::ChooseTileVariant);
+        } else if let Some(n) = ui_tracker.tile_variant_buttons.as_ref()
+            .and_then(|b| b.iter().position(|b| *b == entity)) {
+            let Some(tile_type) = &ui_tracker.chosen_tile_type else { continue };
+            let Some(tile_variant) = textures.tile_textures.get(tile_type).unwrap().keys().nth(n) else { continue };
+            ui_tracker.chosen_tile_variant = Some(tile_variant.clone());
+            next_state.set(AdminEditor::ChooseTileColor);
+        } else if let Some(n) = ui_tracker.tile_color_buttons.as_ref()
+            .and_then(|b| b.iter().position(|b| *b == entity)) {
+            let Some(tile_type) = &ui_tracker.chosen_tile_type else { continue };
+            let Some(tile_variant) = &ui_tracker.chosen_tile_variant else { continue };
+            let Some(tile_color) = textures.tile_textures.get(tile_type).unwrap().get(tile_variant).unwrap().keys().nth(n) else { continue };
+            ui_tracker.chosen_tile_color = Some(tile_color.clone());
+            next_state.set(AdminEditor::PlaceTile);
+        }
+    }
+}
+
+fn world_click(
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    windows: Query<&Window>,
+    layout: Res<HexLayoutResource>,
+    focus: Res<Focus>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+) {
+    if !mouse_button.just_pressed(MouseButton::Left) { return }
+    for (camera, transform) in &cameras {
+        let RenderTarget::Window(window) = camera.target else { continue };
+        let WindowRef::Entity(entity) = window else { continue };
+        if focus.0 != Some(entity) { continue }
+        let Ok(window) = windows.get(entity) else { return };
+        let Some(cursor) = window.cursor_position() else { return };
+        let Some(pos) = camera.viewport_to_world_2d(transform, cursor) else { return };
+        let hex = layout.0.world_pos_to_hex(pos);
+        info!("Clicked Hex: {:?}", hex);
+    }
+}
+
+struct AdminUI;
+
+impl Plugin for AdminUI {
+    fn build(&self, app: &mut App) {
+        app
+            .init_state::<AdminEditor>()
+            .add_systems(Update, button_listener.run_if(in_state(AppStates::Loaded)))
+            .add_systems(Update, world_click)
+            .add_systems(OnEnter(AdminEditor::Choose), admin_enter_choose)
+            .add_systems(OnExit(AdminEditor::Choose), admin_leave_choose)
+            .add_systems(OnEnter(AdminEditor::ChooseTileType), admin_enter_choose_tile)
+            .add_systems(OnExit(AdminEditor::ChooseTileType), admin_leave_choose_tile)
+            .add_systems(OnEnter(AdminEditor::ChooseTileVariant), admin_enter_choose_variant)
+            .add_systems(OnExit(AdminEditor::ChooseTileVariant), admin_leave_choose_variant)
+            .add_systems(OnEnter(AdminEditor::ChooseTileColor), admin_enter_choose_color)
+            .add_systems(OnExit(AdminEditor::ChooseTileColor), admin_leave_choose_color)
+            .add_systems(OnEnter(AdminEditor::PlaceTile), admin_enter_place_tile)
+            .add_systems(OnExit(AdminEditor::PlaceTile), admin_leave_place_tile)
+        ;
+    }
+}
+
+fn spawn_image_button(commands: &mut Commands, children: &mut Vec<Entity>, texture: Handle<Image>) {
+    let button = commands.spawn((ImageBundle {
+        style: Style {
+            width: Val::Vh(10.),
+            height: Val::Vh(10.),
+            ..default()
+        },
+        image: UiImage::new(texture),
+        ..default()
+    }, Interaction::default())).id();
+    children.push(button);
+}
+
+fn admin_enter_choose(
     mut commands: Commands,
     textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    let Some(first_tile_type) = textures.tile_textures.values().next() else { return; };
+    let Some(first_variant) = first_tile_type.values().next() else { return; };
+    let Some(first_color) = first_variant.values().next() else { return; };
+    let Some(first_texture) = first_color.first() else { return; };
+    let tile_button = commands.spawn((ImageBundle {
+        style: Style {
+            width: Val::Vh(10.),
+            height: Val::Vh(10.),
+            ..default()
+        },
+        image: UiImage::new(first_texture.clone()),
+        ..default()
+    }, Interaction::default())).id();
+    ui_tracker.tile_button = Some(tile_button);
+    commands.entity(ui).push_children(&[tile_button]);
+}
+
+fn admin_leave_choose(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(tile_button) = ui_tracker.tile_button.take() else { return };
+    commands.entity(tile_button).despawn_recursive();
+}
+
+fn admin_enter_choose_tile(
+    mut commands: Commands,
+    textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let mut tile_type_buttons = Vec::new();
+    for variants in textures.tile_textures.values() {
+        let Some(first_variant) = variants.values().next() else { return; };
+        let Some(first_color) = first_variant.values().next() else { return; };
+        let Some(first_texture) = first_color.first() else { return; };
+        spawn_image_button(&mut commands, &mut tile_type_buttons, first_texture.clone());
+    }
+    commands.entity(ui).push_children(&tile_type_buttons[..]);
+    ui_tracker.tile_type_buttons = Some(tile_type_buttons);
+}
+
+fn admin_leave_choose_tile(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    ui_tracker.despawn_back_button(&mut commands);
+    let Some(tile_button) = ui_tracker.tile_type_buttons.take() else { return };
+    for button in tile_button {
+        commands.entity(button).despawn_recursive();
+    }
+}
+
+fn admin_enter_choose_variant(
+    mut commands: Commands,
+    textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let Some(tile_type) = &ui_tracker.chosen_tile_type else { return };
+    let mut tile_variant_buttons = Vec::new();
+    for colors in textures.tile_textures.get(tile_type).unwrap().values() {
+        let Some(first_color) = colors.values().next() else { return; };
+        let Some(first_texture) = first_color.first() else { return; };
+        spawn_image_button(&mut commands, &mut tile_variant_buttons, first_texture.clone());
+    }
+    commands.entity(ui).push_children(&tile_variant_buttons[..]);
+    ui_tracker.tile_variant_buttons = Some(tile_variant_buttons);
+}
+
+fn admin_leave_choose_variant(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    ui_tracker.despawn_back_button(&mut commands);
+    let Some(tile_button) = ui_tracker.tile_variant_buttons.take() else { return };
+    for button in tile_button {
+        commands.entity(button).despawn_recursive();
+    }
+}
+
+fn admin_enter_choose_color(
+    mut commands: Commands,
+    textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let Some(tile_type) = &ui_tracker.chosen_tile_type else { return };
+    let Some(tile_variant) = &ui_tracker.chosen_tile_variant else { return };
+    let mut tile_color_buttons = Vec::new();
+    for colors in textures.tile_textures.get(tile_type).unwrap().get(tile_variant).unwrap().values() {
+        let Some(first_texture) = colors.first() else { return; };
+        spawn_image_button(&mut commands, &mut tile_color_buttons, first_texture.clone());
+    }
+    commands.entity(ui).push_children(&tile_color_buttons[..]);
+    ui_tracker.tile_color_buttons = Some(tile_color_buttons);
+}
+
+fn admin_leave_choose_color(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    ui_tracker.despawn_back_button(&mut commands);
+    let Some(tile_button) = ui_tracker.tile_color_buttons.take() else { return };
+    for button in tile_button {
+        commands.entity(button).despawn_recursive();
+    }
+}
+
+fn admin_enter_place_tile(
+    mut commands: Commands,
+    textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let Some(tile_type) = &ui_tracker.chosen_tile_type else { return };
+    let Some(tile_variant) = &ui_tracker.chosen_tile_variant else { return };
+    let Some(tile_color) = &ui_tracker.chosen_tile_color else { return };
+    let mut tile_textures = Vec::new();
+    for texture in textures.get_tile_textures(tile_type, tile_variant, tile_color).unwrap() {
+        spawn_image_button(&mut commands, &mut tile_textures, texture.clone());
+    }
+    commands.entity(ui).push_children(&tile_textures[..]);
+    ui_tracker.tile_textures = Some(tile_textures);
+}
+
+fn admin_leave_place_tile(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    ui_tracker.despawn_back_button(&mut commands);
+    let Some(tile_button) = ui_tracker.tile_textures.take() else { return };
+    for button in tile_button {
+        commands.entity(button).despawn_recursive();
+    }
+}
+
+fn setup_ui(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+    mut next_state: ResMut<NextState<AdminEditor>>,
 ) {
     let admin_window = commands.spawn(Window {
         title: String::from("Faerûn - Admin"),
@@ -202,22 +499,55 @@ fn setup(
         },
         ..default()
     }).id();
-    let layout = HexLayout {
-        hex_size: Vec2::splat(105. * 3f32.sqrt()),
-        orientation: HexOrientation::Pointy,
+    let bar = commands.spawn(NodeBundle {
+        style: Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            width: Val::Percent(100.),
+            height: Val::Vh(10.),
+            ..default()
+        },
+        background_color: BackgroundColor(Color::BLACK),
         ..default()
-    };
+    }).id();
+    ui_tracker.admin_bar = Some(bar);
+    commands.spawn((NodeBundle {
+        style: Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::FlexEnd,
+            justify_content: JustifyContent::Center,
+            width: Val::Percent(100.),
+            height: Val::Percent(100.),
+            ..default()
+        },
+        ..default()
+    }, TargetCamera(admin_camera))).push_children(&[bar]);
+    next_state.set(AdminEditor::Choose);
+}
+
+#[derive(Resource)]
+struct HexLayoutResource(HexLayout);
+
+fn setup(
+    mut commands: Commands,
+    layout: Res<HexLayoutResource>,
+    textures: Res<Textures>,
+) {
+    let layout = &layout.0;
     let handles = &textures.location_textures[..];
     let _ = Hex::default().spiral_range(0..10)
         .take(handles.len())
         .enumerate()
         .map(|(i, hex)| {
             let pos = layout.hex_to_world_pos(hex);
-            commands.spawn(SpriteBundle {
+            commands.spawn((SpriteBundle {
                 texture: handles[i].clone(),
                 transform: Transform::from_xyz(pos.x, pos.y, 0.),
                 ..default()
-            });
+            }, Interaction::default()));
         })
         .collect::<Vec<_>>();
 }
@@ -230,7 +560,7 @@ fn focus_checker(
     mut focus: ResMut<Focus>,
 ) {
     for ev in event_reader.read() {
-        if !ev.focused { continue }
+        if !ev.focused { continue; }
         focus.0 = Some(ev.window);
     }
 }
@@ -271,9 +601,9 @@ fn zoom(
     use bevy::input::mouse::MouseScrollUnit;
     for ev in scroll.read() {
         for (mut proj, camera) in cameras.iter_mut() {
-            let RenderTarget::Window(window) = camera.target else { continue };
-            let WindowRef::Entity(entity) = window else { continue };
-            if focus.0 != Some(entity) { continue }
+            let RenderTarget::Window(window) = camera.target else { continue; };
+            let WindowRef::Entity(entity) = window else { continue; };
+            if focus.0 != Some(entity) { continue; }
             match ev.unit {
                 MouseScrollUnit::Line => {
                     scale.0 -= time.delta().as_secs_f32() * ev.y;
@@ -296,9 +626,9 @@ fn map_drag(
 ) {
     for ev in mouse_movement.read() {
         for (mut transform, camera) in cameras.iter_mut() {
-            let RenderTarget::Window(window) = camera.target else { continue };
-            let WindowRef::Entity(entity) = window else { continue };
-            if focus.0 != Some(entity) { continue }
+            let RenderTarget::Window(window) = camera.target else { continue; };
+            let WindowRef::Entity(entity) = window else { continue; };
+            if focus.0 != Some(entity) { continue; }
             if mouse_button.pressed(MouseButton::Left) {
                 let d = ev.position - last_pos.0;
                 let d = d * scale.0.exp();
@@ -336,18 +666,28 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: None,
-            close_when_requested: true,
+            close_when_requested: false,
             exit_condition: ExitCondition::DontExit,
+        }))
+        .add_plugins(AdminUI)
+        .insert_resource(HexLayoutResource(HexLayout {
+            hex_size: Vec2::splat(105. * 3f32.sqrt()),
+            orientation: HexOrientation::Pointy,
+            ..default()
         }))
         .init_resource::<Scale>()
         .init_resource::<MouseLastPosition>()
         .init_resource::<Textures>()
         .init_resource::<FoldersLoading>()
         .init_resource::<Focus>()
+        .init_resource::<UITracker>()
         .init_state::<AppStates>()
         .add_systems(OnEnter(AppStates::Loading), load)
         .add_systems(Update, check_loading.run_if(in_state(AppStates::Loading)))
-        .add_systems(OnEnter(AppStates::Loaded), setup)
+        .add_systems(OnEnter(AppStates::Loaded), (
+            setup,
+            setup_ui,
+        ))
         .add_systems(FixedUpdate, (
             move_camera,
             zoom,
