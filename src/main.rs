@@ -28,6 +28,9 @@ enum AdminEditor {
     ChooseTileVariant,
     ChooseTileColor,
     PlaceTile,
+    ChooseOverlayType,
+    ChooseOverlay,
+    PlaceOverlay,
 }
 
 #[derive(Resource, Default)]
@@ -42,12 +45,7 @@ type TileVariants = BTreeMap<String, TileColors>;
 
 #[derive(Resource, Default)]
 struct Textures {
-    location_textures: Vec<Handle<Image>>,
-    marker_textures: Vec<Handle<Image>>,
-    flair_textures: Vec<Handle<Image>>,
-    path_textures: Vec<Handle<Image>>,
-    river_textures: Vec<Handle<Image>>,
-    road_textures: Vec<Handle<Image>>,
+    overlay_textures: BTreeMap<String, Vec<Handle<Image>>>,
     figure_textures: Vec<Handle<Image>>,
     tile_textures: BTreeMap<String, TileVariants>,
 }
@@ -105,14 +103,6 @@ impl Textures {
             .and_then(|hm| hm.get(tile_color))
             .map(Vec::as_slice)
     }
-
-    fn get_location(&self, index: usize) -> Option<&Handle<Image>> {
-        self.location_textures.get(index)
-    }
-
-    fn get_figure(&self, index: usize) -> Option<&Handle<Image>> {
-        self.figure_textures.get(index)
-    }
 }
 
 #[derive(Resource, Default)]
@@ -164,14 +154,7 @@ fn check_loading(
                 .map(UntypedHandle::typed)
                 .collect();
             if tile_type == "overlay" {
-                match tile_variant {
-                    "flairs" => textures.flair_textures = handles,
-                    "markers" => textures.marker_textures = handles,
-                    "paths" => textures.path_textures = handles,
-                    "rivers" => textures.river_textures = handles,
-                    "roads" => textures.road_textures = handles,
-                    tt => warn!("Unknown overlay variant: {}", tt)
-                }
+                textures.overlay_textures.insert(tile_variant.to_owned(), handles);
             } else {
                 textures.push_tile(tile_type.into(), tile_variant.into(), color.into(), handles);
             }
@@ -193,7 +176,7 @@ fn check_loading(
             if name == "figures" {
                 textures.figure_textures.extend(handles.into_iter());
             } else if name == "locations" {
-                textures.location_textures.extend(handles.into_iter());
+                textures.overlay_textures.insert("locations".to_owned(), handles);
             }
         };
         if folders_loading.0.is_empty() {
@@ -206,14 +189,10 @@ fn check_loading(
 struct UITracker {
     admin_bar: Option<Entity>,
     back_button: Option<Entity>,
-    tile_button: Option<Entity>,
-    tile_type_buttons: Option<Vec<Entity>>,
+    buttons: Option<Vec<Entity>>,
     chosen_tile_type: Option<String>,
-    tile_variant_buttons: Option<Vec<Entity>>,
     chosen_tile_variant: Option<String>,
-    tile_color_buttons: Option<Vec<Entity>>,
     chosen_tile_color: Option<String>,
-    tile_textures: Option<Vec<Entity>>,
 }
 
 impl UITracker {
@@ -230,11 +209,6 @@ impl UITracker {
         )).id();
         commands.entity(ui).push_children(&[back]);
         self.back_button = Some(back);
-    }
-
-    fn despawn_back_button(&mut self, commands: &mut Commands) {
-        let Some(back) = self.back_button.take() else { return };
-        commands.entity(back).despawn_recursive();
     }
 }
 
@@ -258,30 +232,46 @@ fn button_listener(
                 AdminEditor::ChooseTileVariant => Some(AdminEditor::ChooseTileType),
                 AdminEditor::ChooseTileColor => Some(AdminEditor::ChooseTileVariant),
                 AdminEditor::PlaceTile => Some(AdminEditor::ChooseTileColor),
+                AdminEditor::ChooseOverlayType => Some(AdminEditor::Choose),
+                AdminEditor::ChooseOverlay => Some(AdminEditor::ChooseOverlayType),
+                AdminEditor::PlaceOverlay => Some(AdminEditor::ChooseOverlay),
             };
             if let Some(next) = next {
                 next_state.set(next);
             }
-        } else if ui_tracker.tile_button == Some(entity) {
-            next_state.set(AdminEditor::ChooseTileType);
-        } else if let Some(n) = ui_tracker.tile_type_buttons.as_ref()
+        } else if let Some(n) = ui_tracker.buttons.as_ref()
             .and_then(|b| b.iter().position(|b| *b == entity)) {
-            let Some(tile_type) = textures.tile_textures.keys().nth(n) else { continue };
-            ui_tracker.chosen_tile_type = Some(tile_type.clone());
-            next_state.set(AdminEditor::ChooseTileVariant);
-        } else if let Some(n) = ui_tracker.tile_variant_buttons.as_ref()
-            .and_then(|b| b.iter().position(|b| *b == entity)) {
-            let Some(tile_type) = &ui_tracker.chosen_tile_type else { continue };
-            let Some(tile_variant) = textures.tile_textures.get(tile_type).unwrap().keys().nth(n) else { continue };
-            ui_tracker.chosen_tile_variant = Some(tile_variant.clone());
-            next_state.set(AdminEditor::ChooseTileColor);
-        } else if let Some(n) = ui_tracker.tile_color_buttons.as_ref()
-            .and_then(|b| b.iter().position(|b| *b == entity)) {
-            let Some(tile_type) = &ui_tracker.chosen_tile_type else { continue };
-            let Some(tile_variant) = &ui_tracker.chosen_tile_variant else { continue };
-            let Some(tile_color) = textures.tile_textures.get(tile_type).unwrap().get(tile_variant).unwrap().keys().nth(n) else { continue };
-            ui_tracker.chosen_tile_color = Some(tile_color.clone());
-            next_state.set(AdminEditor::PlaceTile);
+            match current_state.get() {
+                AdminEditor::NotLoaded => {}
+                AdminEditor::Choose if n == 0 => {
+                    next_state.set(AdminEditor::ChooseTileType);
+                }
+                AdminEditor::Choose => {
+                    next_state.set(AdminEditor::ChooseOverlayType);
+                }
+                AdminEditor::ChooseTileType => {
+                    let Some(tile_type) = textures.tile_textures.keys().nth(n) else { continue };
+                    ui_tracker.chosen_tile_type = Some(tile_type.clone());
+                    next_state.set(AdminEditor::ChooseTileVariant);
+                }
+                AdminEditor::ChooseTileVariant => {
+                    let Some(tile_type) = &ui_tracker.chosen_tile_type else { continue };
+                    let Some(tile_variant) = textures.tile_textures.get(tile_type).unwrap().keys().nth(n) else { continue };
+                    ui_tracker.chosen_tile_variant = Some(tile_variant.clone());
+                    next_state.set(AdminEditor::ChooseTileColor);
+                }
+                AdminEditor::ChooseTileColor => {
+                    let Some(tile_type) = &ui_tracker.chosen_tile_type else { continue };
+                    let Some(tile_variant) = &ui_tracker.chosen_tile_variant else { continue };
+                    let Some(tile_color) = textures.tile_textures.get(tile_type).unwrap().get(tile_variant).unwrap().keys().nth(n) else { continue };
+                    ui_tracker.chosen_tile_color = Some(tile_color.clone());
+                    next_state.set(AdminEditor::PlaceTile);
+                }
+                AdminEditor::PlaceTile => {}
+                AdminEditor::ChooseOverlayType => {}
+                AdminEditor::ChooseOverlay => {}
+                AdminEditor::PlaceOverlay => {}
+            }
         }
     }
 }
@@ -345,15 +335,17 @@ impl Plugin for AdminUI {
             .add_systems(Update, button_listener.run_if(in_state(AppStates::Loaded)))
             .add_systems(Update, place_tile)
             .add_systems(OnEnter(AdminEditor::Choose), admin_enter_choose)
-            .add_systems(OnExit(AdminEditor::Choose), admin_leave_choose)
+            .add_systems(OnExit(AdminEditor::Choose), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::ChooseTileType), admin_enter_choose_tile)
-            .add_systems(OnExit(AdminEditor::ChooseTileType), admin_leave_choose_tile)
+            .add_systems(OnExit(AdminEditor::ChooseTileType), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::ChooseTileVariant), admin_enter_choose_variant)
-            .add_systems(OnExit(AdminEditor::ChooseTileVariant), admin_leave_choose_variant)
+            .add_systems(OnExit(AdminEditor::ChooseTileVariant), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::ChooseTileColor), admin_enter_choose_color)
-            .add_systems(OnExit(AdminEditor::ChooseTileColor), admin_leave_choose_color)
+            .add_systems(OnExit(AdminEditor::ChooseTileColor), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::PlaceTile), admin_enter_place_tile)
-            .add_systems(OnExit(AdminEditor::PlaceTile), admin_leave_place_tile)
+            .add_systems(OnExit(AdminEditor::PlaceTile), admin_change_menu)
+            .add_systems(OnEnter(AdminEditor::ChooseOverlayType), admin_enter_choose_overlay_type)
+            .add_systems(OnExit(AdminEditor::ChooseOverlayType), admin_change_menu)
             .add_systems(Update, place_tile.run_if(in_state(AdminEditor::PlaceTile)))
         ;
     }
@@ -381,26 +373,14 @@ fn admin_enter_choose(
     let Some(first_tile_type) = textures.tile_textures.values().next() else { return; };
     let Some(first_variant) = first_tile_type.values().next() else { return; };
     let Some(first_color) = first_variant.values().next() else { return; };
-    let Some(first_texture) = first_color.first() else { return; };
-    let tile_button = commands.spawn((ImageBundle {
-        style: Style {
-            width: Val::Vh(10.),
-            height: Val::Vh(10.),
-            ..default()
-        },
-        image: UiImage::new(first_texture.clone()),
-        ..default()
-    }, Interaction::default())).id();
-    ui_tracker.tile_button = Some(tile_button);
-    commands.entity(ui).push_children(&[tile_button]);
-}
-
-fn admin_leave_choose(
-    mut commands: Commands,
-    mut ui_tracker: ResMut<UITracker>,
-) {
-    let Some(tile_button) = ui_tracker.tile_button.take() else { return };
-    commands.entity(tile_button).despawn_recursive();
+    let Some(first_tile_texture) = first_color.first() else { return; };
+    let Some(first_overlay_type) = textures.overlay_textures.values().next() else { return };
+    let Some(first_overlay_texture) = first_overlay_type.first() else { return };
+    let mut choose_buttons = Vec::new();
+    spawn_image_button(&mut commands, &mut choose_buttons, first_tile_texture.clone());
+    spawn_image_button(&mut commands, &mut choose_buttons, first_overlay_texture.clone());
+    commands.entity(ui).push_children(&choose_buttons[..]);
+    ui_tracker.buttons = Some(choose_buttons);
 }
 
 fn admin_enter_choose_tile(
@@ -418,16 +398,18 @@ fn admin_enter_choose_tile(
         spawn_image_button(&mut commands, &mut tile_type_buttons, first_texture.clone());
     }
     commands.entity(ui).push_children(&tile_type_buttons[..]);
-    ui_tracker.tile_type_buttons = Some(tile_type_buttons);
+    ui_tracker.buttons = Some(tile_type_buttons);
 }
 
-fn admin_leave_choose_tile(
+fn admin_change_menu(
     mut commands: Commands,
     mut ui_tracker: ResMut<UITracker>,
 ) {
-    ui_tracker.despawn_back_button(&mut commands);
-    let Some(tile_button) = ui_tracker.tile_type_buttons.take() else { return };
-    for button in tile_button {
+    if let Some(back_button) = ui_tracker.back_button.take() {
+        commands.entity(back_button).despawn_recursive();
+    }
+    let Some(buttons) = ui_tracker.buttons.take() else { return };
+    for button in buttons {
         commands.entity(button).despawn_recursive();
     }
 }
@@ -447,18 +429,7 @@ fn admin_enter_choose_variant(
         spawn_image_button(&mut commands, &mut tile_variant_buttons, first_texture.clone());
     }
     commands.entity(ui).push_children(&tile_variant_buttons[..]);
-    ui_tracker.tile_variant_buttons = Some(tile_variant_buttons);
-}
-
-fn admin_leave_choose_variant(
-    mut commands: Commands,
-    mut ui_tracker: ResMut<UITracker>,
-) {
-    ui_tracker.despawn_back_button(&mut commands);
-    let Some(tile_button) = ui_tracker.tile_variant_buttons.take() else { return };
-    for button in tile_button {
-        commands.entity(button).despawn_recursive();
-    }
+    ui_tracker.buttons = Some(tile_variant_buttons);
 }
 
 fn admin_enter_choose_color(
@@ -476,18 +447,7 @@ fn admin_enter_choose_color(
         spawn_image_button(&mut commands, &mut tile_color_buttons, first_texture.clone());
     }
     commands.entity(ui).push_children(&tile_color_buttons[..]);
-    ui_tracker.tile_color_buttons = Some(tile_color_buttons);
-}
-
-fn admin_leave_choose_color(
-    mut commands: Commands,
-    mut ui_tracker: ResMut<UITracker>,
-) {
-    ui_tracker.despawn_back_button(&mut commands);
-    let Some(tile_button) = ui_tracker.tile_color_buttons.take() else { return };
-    for button in tile_button {
-        commands.entity(button).despawn_recursive();
-    }
+    ui_tracker.buttons = Some(tile_color_buttons);
 }
 
 fn admin_enter_place_tile(
@@ -505,18 +465,23 @@ fn admin_enter_place_tile(
         spawn_image_button(&mut commands, &mut tile_textures, texture.clone());
     }
     commands.entity(ui).push_children(&tile_textures[..]);
-    ui_tracker.tile_textures = Some(tile_textures);
+    ui_tracker.buttons = Some(tile_textures);
 }
 
-fn admin_leave_place_tile(
+fn admin_enter_choose_overlay_type(
     mut commands: Commands,
+    textures: Res<Textures>,
     mut ui_tracker: ResMut<UITracker>,
 ) {
-    ui_tracker.despawn_back_button(&mut commands);
-    let Some(tile_button) = ui_tracker.tile_textures.take() else { return };
-    for button in tile_button {
-        commands.entity(button).despawn_recursive();
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let mut tile_textures = Vec::new();
+    for overlay_types in textures.overlay_textures.values() {
+        let Some(first_texture) = overlay_types.first() else { continue };
+        spawn_image_button(&mut commands, &mut tile_textures, first_texture.clone());
     }
+    commands.entity(ui).push_children(&tile_textures[..]);
+    ui_tracker.buttons = Some(tile_textures);
 }
 
 #[derive(Resource)]
