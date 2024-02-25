@@ -270,23 +270,53 @@ fn button_listener(
     }
 }
 
-fn world_click(
+#[derive(Resource, Default)]
+struct Map {
+    tiles: HashMap<Hex, (Entity, String)>,
+}
+
+fn place_tile(
     cameras: Query<(&Camera, &GlobalTransform)>,
     windows: Query<&Window>,
     layout: Res<HexLayoutResource>,
     focus: Res<Focus>,
     mouse_button: Res<ButtonInput<MouseButton>>,
+    ui_tracker: Res<UITracker>,
+    textures: Res<Textures>,
+    mut map: ResMut<Map>,
+    mut commands: Commands,
+    windows_res: Option<Res<Windows>>,
 ) {
     if !mouse_button.just_pressed(MouseButton::Left) { return }
+    let Some(windows_res) = windows_res else { return };
+    let Some(tile_type) = &ui_tracker.chosen_tile_type else { return };
+    let Some(tile_variant) = &ui_tracker.chosen_tile_variant else { return };
+    let Some(tile_color) = &ui_tracker.chosen_tile_color else { return };
+    let Some(handles) = textures.get_tile_textures(tile_type, tile_variant, tile_color) else { return };
+    let Ok(time) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else { unreachable!() };
+    let Some(handle) = handles.get(time.as_secs() as usize % handles.len()) else { unreachable!() };
     for (camera, transform) in &cameras {
         let RenderTarget::Window(window) = camera.target else { continue };
         let WindowRef::Entity(entity) = window else { continue };
         if focus.0 != Some(entity) { continue }
+        if entity != windows_res.admin_window { return }
         let Ok(window) = windows.get(entity) else { return };
         let Some(cursor) = window.cursor_position() else { return };
         let Some(pos) = camera.viewport_to_world_2d(transform, cursor) else { return };
         let hex = layout.0.world_pos_to_hex(pos);
-        info!("Clicked Hex: {:?}", hex);
+        let pos = layout.0.hex_to_world_pos(hex);
+        let id = commands.spawn(SpriteBundle {
+            transform: Transform::from_xyz(pos.x, pos.y, 0.),
+            texture: handle.clone(),
+            ..default()
+        }).id();
+        let tile = format!("{}_{}.{}", tile_type, tile_variant, tile_color);
+        match map.tiles.insert(hex, (id, tile)) {
+            Some((id, _)) => {
+                commands.entity(id).despawn_recursive();
+            }
+            None => {}
+        }
     }
 }
 
@@ -297,7 +327,7 @@ impl Plugin for AdminUI {
         app
             .init_state::<AdminEditor>()
             .add_systems(Update, button_listener.run_if(in_state(AppStates::Loaded)))
-            .add_systems(Update, world_click)
+            .add_systems(Update, place_tile)
             .add_systems(OnEnter(AdminEditor::Choose), admin_enter_choose)
             .add_systems(OnExit(AdminEditor::Choose), admin_leave_choose)
             .add_systems(OnEnter(AdminEditor::ChooseTileType), admin_enter_choose_tile)
@@ -308,6 +338,7 @@ impl Plugin for AdminUI {
             .add_systems(OnExit(AdminEditor::ChooseTileColor), admin_leave_choose_color)
             .add_systems(OnEnter(AdminEditor::PlaceTile), admin_enter_place_tile)
             .add_systems(OnExit(AdminEditor::PlaceTile), admin_leave_place_tile)
+            .add_systems(Update, place_tile.run_if(in_state(AdminEditor::PlaceTile)))
         ;
     }
 }
@@ -472,6 +503,12 @@ fn admin_leave_place_tile(
     }
 }
 
+#[derive(Resource)]
+struct Windows {
+    admin_window: Entity,
+    user_window: Entity,
+}
+
 fn setup_ui(
     mut commands: Commands,
     mut ui_tracker: ResMut<UITracker>,
@@ -525,32 +562,15 @@ fn setup_ui(
         },
         ..default()
     }, TargetCamera(admin_camera))).push_children(&[bar]);
+    commands.insert_resource(Windows {
+        admin_window,
+        user_window,
+    });
     next_state.set(AdminEditor::Choose);
 }
 
 #[derive(Resource)]
 struct HexLayoutResource(HexLayout);
-
-fn setup(
-    mut commands: Commands,
-    layout: Res<HexLayoutResource>,
-    textures: Res<Textures>,
-) {
-    let layout = &layout.0;
-    let handles = &textures.location_textures[..];
-    let _ = Hex::default().spiral_range(0..10)
-        .take(handles.len())
-        .enumerate()
-        .map(|(i, hex)| {
-            let pos = layout.hex_to_world_pos(hex);
-            commands.spawn((SpriteBundle {
-                texture: handles[i].clone(),
-                transform: Transform::from_xyz(pos.x, pos.y, 0.),
-                ..default()
-            }, Interaction::default()));
-        })
-        .collect::<Vec<_>>();
-}
 
 #[derive(Resource, Default)]
 struct Focus(Option<Entity>);
@@ -681,11 +701,11 @@ fn main() {
         .init_resource::<FoldersLoading>()
         .init_resource::<Focus>()
         .init_resource::<UITracker>()
+        .init_resource::<Map>()
         .init_state::<AppStates>()
         .add_systems(OnEnter(AppStates::Loading), load)
         .add_systems(Update, check_loading.run_if(in_state(AppStates::Loading)))
         .add_systems(OnEnter(AppStates::Loaded), (
-            setup,
             setup_ui,
         ))
         .add_systems(FixedUpdate, (
