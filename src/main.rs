@@ -4,7 +4,7 @@ use std::ops::Deref;
 use bevy::app::AppExit;
 use bevy::asset::{LoadedFolder, LoadState};
 use bevy::prelude::*;
-use bevy::input::mouse::MouseWheel;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::render::camera::RenderTarget;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::sprite::MaterialMesh2dBundle;
@@ -193,6 +193,7 @@ struct UITracker {
     chosen_tile_type: Option<String>,
     chosen_tile_variant: Option<String>,
     chosen_tile_color: Option<String>,
+    chosen_overlay_type: Option<String>,
 }
 
 impl UITracker {
@@ -268,7 +269,11 @@ fn button_listener(
                     next_state.set(AdminEditor::PlaceTile);
                 }
                 AdminEditor::PlaceTile => {}
-                AdminEditor::ChooseOverlayType => {}
+                AdminEditor::ChooseOverlayType => {
+                    let Some(overlay_type) = textures.overlay_textures.keys().nth(n) else { continue };
+                    ui_tracker.chosen_overlay_type = Some(overlay_type.clone());
+                    next_state.set(AdminEditor::ChooseOverlay);
+                }
                 AdminEditor::ChooseOverlay => {}
                 AdminEditor::PlaceOverlay => {}
             }
@@ -345,6 +350,8 @@ impl Plugin for AdminUI {
             .add_systems(OnExit(AdminEditor::PlaceTile), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::ChooseOverlayType), admin_enter_choose_overlay_type)
             .add_systems(OnExit(AdminEditor::ChooseOverlayType), admin_change_menu)
+            .add_systems(OnEnter(AdminEditor::ChooseOverlay), admin_enter_choose_overlay)
+            .add_systems(OnExit(AdminEditor::ChooseOverlay), admin_change_menu)
             .add_systems(Update, place_tile.run_if(in_state(AdminEditor::PlaceTile).and_then(mouse_not_over_admin_bar)))
         ;
     }
@@ -418,6 +425,7 @@ fn admin_enter_choose_tile(
 fn admin_change_menu(
     mut commands: Commands,
     mut ui_tracker: ResMut<UITracker>,
+    mut scrolling_lists: Query<(&mut ScrollingList, &mut Style)>,
 ) {
     if let Some(back_button) = ui_tracker.back_button.take() {
         commands.entity(back_button).despawn_recursive();
@@ -425,6 +433,10 @@ fn admin_change_menu(
     let Some(buttons) = ui_tracker.buttons.take() else { return };
     for button in buttons {
         commands.entity(button).despawn_recursive();
+    }
+    for (mut scrolling_list, mut style) in &mut scrolling_lists {
+        scrolling_list.position = 0.;
+        style.left = Val::Px(0.);
     }
 }
 
@@ -489,19 +501,62 @@ fn admin_enter_choose_overlay_type(
 ) {
     let Some(ui) = ui_tracker.admin_bar else { return };
     ui_tracker.back_button(&mut commands);
-    let mut tile_textures = Vec::new();
+    let mut overlay_textures = Vec::new();
     for overlay_types in textures.overlay_textures.values() {
         let Some(first_texture) = overlay_types.first() else { continue };
-        spawn_image_button(&mut commands, &mut tile_textures, first_texture.clone());
+        spawn_image_button(&mut commands, &mut overlay_textures, first_texture.clone());
     }
-    commands.entity(ui).push_children(&tile_textures[..]);
-    ui_tracker.buttons = Some(tile_textures);
+    commands.entity(ui).push_children(&overlay_textures[..]);
+    ui_tracker.buttons = Some(overlay_textures);
+}
+
+fn admin_enter_choose_overlay(
+    mut commands: Commands,
+    textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let Some(overlay_type) = &ui_tracker.chosen_overlay_type else { return };
+    let mut overlay_textures = Vec::new();
+    for overlay_texture in textures.overlay_textures.get(overlay_type).unwrap() {
+        spawn_image_button(&mut commands, &mut overlay_textures, overlay_texture.clone());
+    }
+    commands.entity(ui).push_children(&overlay_textures[..]);
+    ui_tracker.buttons = Some(overlay_textures);
 }
 
 #[derive(Resource)]
 struct Windows {
     admin_window: Entity,
     user_window: Entity,
+}
+
+#[derive(Component, Default)]
+struct ScrollingList {
+    position: f32,
+}
+
+//Modified copy from https://bevyengine.org/examples/UI%20(User%20Interface)/ui/
+fn mouse_scroll(
+    mut mouse_wheel_events: EventReader<MouseWheel>,
+    mut query_list: Query<(&mut ScrollingList, &mut Style, &Parent, &Node)>,
+    query_node: Query<&Node>,
+) {
+    for mouse_wheel_event in mouse_wheel_events.read() {
+        for (mut scrolling_list, mut style, parent, list_node) in &mut query_list {
+            let items_width = list_node.size().x;
+            let container_width = query_node.get(parent.get()).unwrap().size().x;
+            let max_scroll = (items_width - container_width).max(0.) / 2.;
+            let dx = match mouse_wheel_event.unit {
+                MouseScrollUnit::Line => mouse_wheel_event.x * 20.,
+                MouseScrollUnit::Pixel => mouse_wheel_event.x,
+            };
+            scrolling_list.position += dx;
+            scrolling_list.position = scrolling_list.position.clamp(-max_scroll, max_scroll);
+            style.left = Val::Px(scrolling_list.position);
+        }
+    }
 }
 
 fn setup_ui(
@@ -531,6 +586,18 @@ fn setup_ui(
         },
         ..default()
     }).id();
+    let scroll_bar = commands.spawn((NodeBundle {
+        style: Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::FlexStart,
+            justify_content: JustifyContent::Center,
+            height: Val::Vh(10.),
+            ..default()
+        },
+            ..default()
+    }, ScrollingList::default())).id();
+    ui_tracker.admin_bar = Some(scroll_bar);
     let bar = commands.spawn((NodeBundle {
         style: Style {
             display: Display::Flex,
@@ -539,12 +606,12 @@ fn setup_ui(
             justify_content: JustifyContent::Center,
             width: Val::Percent(100.),
             height: Val::Vh(10.),
+            overflow: Overflow::clip_x(),
             ..default()
         },
         background_color: BackgroundColor(Color::BLACK),
         ..default()
-    }, Interaction::default())).id();
-    ui_tracker.admin_bar = Some(bar);
+    }, Interaction::default())).push_children(&[scroll_bar]).id();
     commands.spawn((NodeBundle {
         style: Style {
             display: Display::Flex,
@@ -711,6 +778,7 @@ fn main() {
         .add_systems(Update, (
             exit_on_esc,
             focus_checker,
+            mouse_scroll,
         ).run_if(in_state(AppStates::Loaded)))
         .run();
 }
