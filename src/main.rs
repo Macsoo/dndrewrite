@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use bevy::app::AppExit;
-use bevy::asset::{LoadedFolder, LoadState};
+use bevy::asset::{AssetPath, LoadedFolder, LoadState};
 use bevy::prelude::*;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::render::camera::RenderTarget;
@@ -149,10 +149,19 @@ fn check_loading(
         if let Some(name) = name.strip_prefix("pointy.") {
             let Some((tile_name, color)) = name.split_once('.') else { continue; };
             let Some((tile_type, tile_variant)) = tile_name.rsplit_once('_') else { continue; };
-            let handles: Vec<Handle<Image>> = loaded_folder.handles
+            let mut handles: Vec<Handle<Image>> = loaded_folder.handles
                 .into_iter()
                 .map(UntypedHandle::typed)
                 .collect();
+            handles.sort_by_cached_key(|h| {
+                let Some(path) = h.path().map(AssetPath::path) else { return Err(h.clone()) };
+                let Some(file_name) = path.file_name() else { return Err(h.clone()) };
+                let Some(file_name_str) = file_name.to_str() else { return Err(h.clone()) };
+                let Some((without_extension, _)) = file_name_str.rsplit_once('.') else { return Err(h.clone()) };
+                let Some((_, number)) = without_extension.rsplit_once('_') else { return Err(h.clone()) };
+                let Ok(parsed) = number.parse::<u32>() else { return Err(h.clone()) };
+                Ok(parsed)
+            });
             if tile_type == "overlay" {
                 textures.overlay_textures.insert(tile_variant.to_owned(), handles);
             } else {
@@ -194,6 +203,7 @@ struct UITracker {
     chosen_tile_variant: Option<String>,
     chosen_tile_color: Option<String>,
     chosen_overlay_type: Option<String>,
+    chosen_overlay: Option<usize>,
 }
 
 impl UITracker {
@@ -203,7 +213,7 @@ impl UITracker {
             TextBundle::from_section(
                 "<=",
                 TextStyle {
-                    font_size: 24.,
+                    font_size: 48.,
                     ..default()
                 }
             ), Interaction::default()
@@ -274,7 +284,10 @@ fn button_listener(
                     ui_tracker.chosen_overlay_type = Some(overlay_type.clone());
                     next_state.set(AdminEditor::ChooseOverlay);
                 }
-                AdminEditor::ChooseOverlay => {}
+                AdminEditor::ChooseOverlay => {
+                    ui_tracker.chosen_overlay = Some(n);
+                    next_state.set(AdminEditor::PlaceOverlay);
+                }
                 AdminEditor::PlaceOverlay => {}
             }
         }
@@ -284,6 +297,7 @@ fn button_listener(
 #[derive(Resource, Default)]
 struct Map {
     tiles: HashMap<Hex, (Entity, String)>,
+    overlay: HashMap<Hex, HashMap<String, (Entity, usize)>>,
 }
 
 fn place_tile(
@@ -331,6 +345,50 @@ fn place_tile(
     }
 }
 
+fn place_overlay(
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    windows: Query<&Window>,
+    layout: Res<HexLayoutResource>,
+    focus: Res<Focus>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    ui_tracker: Res<UITracker>,
+    textures: Res<Textures>,
+    mut map: ResMut<Map>,
+    mut commands: Commands,
+    windows_res: Option<Res<Windows>>,
+) {
+    if !mouse_button.just_pressed(MouseButton::Left) { return }
+    let Some(windows_res) = windows_res else { return };
+    let Some(overlay_type) = &ui_tracker.chosen_overlay_type else { return };
+    let Some(overlay) = ui_tracker.chosen_overlay else { return };
+    let Some(overlays) = textures.overlay_textures.get(overlay_type) else { return };
+    let Some(handle) = overlays.get(overlay) else { return };
+    for (camera, transform) in &cameras {
+        let RenderTarget::Window(window) = camera.target else { continue };
+        let WindowRef::Entity(entity) = window else { continue };
+        if focus.0 != Some(entity) { continue }
+        if entity != windows_res.admin_window { return }
+        let Ok(window) = windows.get(entity) else { return };
+        let Some(cursor) = window.cursor_position() else { return };
+        let Some(pos) = camera.viewport_to_world_2d(transform, cursor) else { return };
+        let hex = layout.0.world_pos_to_hex(pos);
+        let pos = layout.0.hex_to_world_pos(hex);
+        let id = commands.spawn(SpriteBundle {
+            transform: Transform::from_xyz(pos.x, pos.y, 1.),
+            texture: handle.clone(),
+            ..default()
+        }).id();
+        map.overlay.entry(hex).and_modify(|map|  {
+            match map.insert(overlay_type.clone(), (id, overlay)) {
+                Some((id, _)) => {
+                    commands.entity(id).despawn_recursive();
+                }
+                None => {}
+            }
+        }).or_insert_with(|| HashMap::from([(overlay_type.clone(), (id, overlay))]));
+    }
+}
+
 struct AdminUI;
 
 impl Plugin for AdminUI {
@@ -352,7 +410,10 @@ impl Plugin for AdminUI {
             .add_systems(OnExit(AdminEditor::ChooseOverlayType), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::ChooseOverlay), admin_enter_choose_overlay)
             .add_systems(OnExit(AdminEditor::ChooseOverlay), admin_change_menu)
+            .add_systems(OnEnter(AdminEditor::PlaceOverlay), admin_enter_place_overlay)
+            .add_systems(OnExit(AdminEditor::PlaceOverlay), admin_change_menu)
             .add_systems(Update, place_tile.run_if(in_state(AdminEditor::PlaceTile).and_then(mouse_not_over_admin_bar)))
+            .add_systems(Update, place_overlay.run_if(in_state(AdminEditor::PlaceOverlay).and_then(mouse_not_over_admin_bar)))
         ;
     }
 }
@@ -361,13 +422,15 @@ fn mouse_not_over_admin_bar(
     ui_tracker: Res<UITracker>,
     focus: Res<Focus>,
     windows: Option<Res<Windows>>,
+    scroll_bar_query: Query<&Parent, With<ScrollingList>>,
     nodes: Query<(&Interaction), With<Node>>,
 ) -> bool {
     let Some(ui) = ui_tracker.admin_bar else { return false };
+    let Ok(parent) = scroll_bar_query.get(ui).map(Parent::get) else { return false };
     let Some(windows) = windows else { return false };
     let Some(entity) = focus.0 else { return false };
     if entity != windows.admin_window { return false }
-    let Ok(interaction) = nodes.get(ui) else { return false };
+    let Ok(interaction) = nodes.get(parent) else { return false };
     if *interaction == Interaction::None { true }
     else { false }
 }
@@ -526,6 +589,22 @@ fn admin_enter_choose_overlay(
     ui_tracker.buttons = Some(overlay_textures);
 }
 
+fn admin_enter_place_overlay(
+    mut commands: Commands,
+    textures: Res<Textures>,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let Some(overlay_type) = &ui_tracker.chosen_overlay_type else { return };
+    let Some(overlay) = ui_tracker.chosen_overlay else { return };
+    let mut overlay_textures = Vec::new();
+    let overlay_texture = textures.overlay_textures.get(overlay_type).unwrap().get(overlay).unwrap();
+    spawn_image_button(&mut commands, &mut overlay_textures, overlay_texture.clone());
+    commands.entity(ui).push_children(&overlay_textures[..]);
+    ui_tracker.buttons = Some(overlay_textures);
+}
+
 #[derive(Resource)]
 struct Windows {
     admin_window: Entity,
@@ -590,7 +669,7 @@ fn setup_ui(
         style: Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
-            align_items: AlignItems::FlexStart,
+            align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             height: Val::Vh(10.),
             ..default()
