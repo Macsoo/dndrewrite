@@ -333,7 +333,6 @@ impl Plugin for AdminUI {
         app
             .init_state::<AdminEditor>()
             .add_systems(Update, button_listener.run_if(in_state(AppStates::Loaded)))
-            .add_systems(Update, place_tile)
             .add_systems(OnEnter(AdminEditor::Choose), admin_enter_choose)
             .add_systems(OnExit(AdminEditor::Choose), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::ChooseTileType), admin_enter_choose_tile)
@@ -346,9 +345,24 @@ impl Plugin for AdminUI {
             .add_systems(OnExit(AdminEditor::PlaceTile), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::ChooseOverlayType), admin_enter_choose_overlay_type)
             .add_systems(OnExit(AdminEditor::ChooseOverlayType), admin_change_menu)
-            .add_systems(Update, place_tile.run_if(in_state(AdminEditor::PlaceTile)))
+            .add_systems(Update, place_tile.run_if(in_state(AdminEditor::PlaceTile).and_then(mouse_not_over_admin_bar)))
         ;
     }
+}
+
+fn mouse_not_over_admin_bar(
+    ui_tracker: Res<UITracker>,
+    focus: Res<Focus>,
+    windows: Option<Res<Windows>>,
+    nodes: Query<(&Interaction), With<Node>>,
+) -> bool {
+    let Some(ui) = ui_tracker.admin_bar else { return false };
+    let Some(windows) = windows else { return false };
+    let Some(entity) = focus.0 else { return false };
+    if entity != windows.admin_window { return false }
+    let Ok(interaction) = nodes.get(ui) else { return false };
+    if *interaction == Interaction::None { true }
+    else { false }
 }
 
 fn spawn_image_button(commands: &mut Commands, children: &mut Vec<Entity>, texture: Handle<Image>) {
@@ -517,7 +531,7 @@ fn setup_ui(
         },
         ..default()
     }).id();
-    let bar = commands.spawn(NodeBundle {
+    let bar = commands.spawn((NodeBundle {
         style: Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
@@ -529,7 +543,7 @@ fn setup_ui(
         },
         background_color: BackgroundColor(Color::BLACK),
         ..default()
-    }).id();
+    }, Interaction::default())).id();
     ui_tracker.admin_bar = Some(bar);
     commands.spawn((NodeBundle {
         style: Style {
