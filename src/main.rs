@@ -31,6 +31,8 @@ enum AdminEditor {
     ChooseOverlayType,
     ChooseOverlay,
     PlaceOverlay,
+    ChooseTextPosition,
+    WriteText,
 }
 
 #[derive(Resource, Default)]
@@ -204,6 +206,7 @@ struct UITracker {
     chosen_tile_color: Option<String>,
     chosen_overlay_type: Option<String>,
     chosen_overlay: Option<usize>,
+    chosen_text_position: Option<Hex>,
 }
 
 impl UITracker {
@@ -246,6 +249,8 @@ fn button_listener(
                 AdminEditor::ChooseOverlayType => Some(AdminEditor::Choose),
                 AdminEditor::ChooseOverlay => Some(AdminEditor::ChooseOverlayType),
                 AdminEditor::PlaceOverlay => Some(AdminEditor::ChooseOverlay),
+                AdminEditor::ChooseTextPosition => Some(AdminEditor::Choose),
+                AdminEditor::WriteText => Some(AdminEditor::ChooseTextPosition),
             };
             if let Some(next) = next {
                 next_state.set(next);
@@ -257,8 +262,11 @@ fn button_listener(
                 AdminEditor::Choose if n == 0 => {
                     next_state.set(AdminEditor::ChooseTileType);
                 }
-                AdminEditor::Choose => {
+                AdminEditor::Choose if n == 1 => {
                     next_state.set(AdminEditor::ChooseOverlayType);
+                }
+                AdminEditor::Choose => {
+                    next_state.set(AdminEditor::ChooseTextPosition);
                 }
                 AdminEditor::ChooseTileType => {
                     let Some(tile_type) = textures.tile_textures.keys().nth(n) else { continue };
@@ -289,6 +297,8 @@ fn button_listener(
                     next_state.set(AdminEditor::PlaceOverlay);
                 }
                 AdminEditor::PlaceOverlay => {}
+                AdminEditor::ChooseTextPosition => {}
+                AdminEditor::WriteText => {}
             }
         }
     }
@@ -298,6 +308,7 @@ fn button_listener(
 struct Map {
     tiles: HashMap<Hex, (Entity, String)>,
     overlay: HashMap<Hex, HashMap<String, (Entity, usize)>>,
+    text: HashMap<Hex, (Entity, String)>,
 }
 
 fn place_tile(
@@ -336,11 +347,8 @@ fn place_tile(
             ..default()
         }).id();
         let tile = format!("{}_{}.{}", tile_type, tile_variant, tile_color);
-        match map.tiles.insert(hex, (id, tile)) {
-            Some((id, _)) => {
-                commands.entity(id).despawn_recursive();
-            }
-            None => {}
+        if let Some((id, _)) = map.tiles.insert(hex, (id, tile)) {
+            commands.entity(id).despawn_recursive();
         }
     }
 }
@@ -379,13 +387,76 @@ fn place_overlay(
             ..default()
         }).id();
         map.overlay.entry(hex).and_modify(|map|  {
-            match map.insert(overlay_type.clone(), (id, overlay)) {
-                Some((id, _)) => {
-                    commands.entity(id).despawn_recursive();
-                }
-                None => {}
+            if let Some((id, _)) = map.insert(overlay_type.clone(), (id, overlay)) {
+                commands.entity(id).despawn_recursive();
             }
         }).or_insert_with(|| HashMap::from([(overlay_type.clone(), (id, overlay))]));
+    }
+}
+
+fn admin_choose_text_position(
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    windows: Query<&Window>,
+    layout: Res<HexLayoutResource>,
+    focus: Res<Focus>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    mut ui_tracker: ResMut<UITracker>,
+    windows_res: Option<Res<Windows>>,
+    mut next_state: ResMut<NextState<AdminEditor>>,
+) {
+    if !mouse_button.just_pressed(MouseButton::Left) { return }
+    let Some(windows_res) = windows_res else { return };
+    for (camera, transform) in &cameras {
+        let RenderTarget::Window(window) = camera.target else { continue };
+        let WindowRef::Entity(entity) = window else { continue };
+        if focus.0 != Some(entity) { continue }
+        if entity != windows_res.admin_window { return }
+        let Ok(window) = windows.get(entity) else { return };
+        let Some(cursor) = window.cursor_position() else { return };
+        let Some(pos) = camera.viewport_to_world_2d(transform, cursor) else { return };
+        let hex = layout.0.world_pos_to_hex(pos);
+        ui_tracker.chosen_text_position = Some(hex);
+        next_state.set(AdminEditor::WriteText);
+    }
+}
+
+fn place_text(
+    mut ev_char: EventReader<ReceivedCharacter>,
+    kbd: Res<ButtonInput<KeyCode>>,
+    mut ui_tracker: ResMut<UITracker>,
+    mut ui_text: Query<&mut Text, With<Node>>,
+    windows: Option<Res<Windows>>,
+    mut commands: Commands,
+    layout: Res<HexLayoutResource>,
+    mut map: ResMut<Map>,
+) {
+    let Some(ui_buttons) = &ui_tracker.buttons else { return };
+    let Some(ui) = ui_buttons.first() else { return };
+    let Some(hex) = ui_tracker.chosen_text_position else { return };
+    let Some(windows) = windows else { return };
+    let Ok(mut text) = ui_text.get_mut(*ui) else { return };
+    let Some(string) = text.sections.get_mut(0).map(|x| &mut x.value) else { return };
+    if kbd.just_pressed(KeyCode::Enter) {
+        let pos = layout.0.hex_to_world_pos(hex);
+        let val = string.clone();
+        let id = commands.spawn(Text2dBundle {
+            transform: Transform::from_xyz(pos.x, pos.y, 1.),
+            text: text.clone(),
+            ..default()
+        }).id();
+        if let Some((id, _)) = map.text.insert(hex, (id, val)) {
+            commands.entity(id).despawn_recursive();
+        };
+        return;
+    }
+    if kbd.just_pressed(KeyCode::Backspace) {
+        string.pop();
+    }
+    for ev in ev_char.read() {
+        if ev.window != windows.admin_window { continue };
+        let Some(char) = ev.char.chars().next() else { continue };
+        if char.is_control() { return };
+        string.push(char);
     }
 }
 
@@ -412,8 +483,14 @@ impl Plugin for AdminUI {
             .add_systems(OnExit(AdminEditor::ChooseOverlay), admin_change_menu)
             .add_systems(OnEnter(AdminEditor::PlaceOverlay), admin_enter_place_overlay)
             .add_systems(OnExit(AdminEditor::PlaceOverlay), admin_change_menu)
+            .add_systems(OnEnter(AdminEditor::ChooseTextPosition), admin_enter_choose_text_position)
+            .add_systems(OnExit(AdminEditor::ChooseTextPosition), admin_change_menu)
+            .add_systems(OnEnter(AdminEditor::WriteText), admin_enter_write_text)
+            .add_systems(OnExit(AdminEditor::WriteText), admin_change_menu)
             .add_systems(Update, place_tile.run_if(in_state(AdminEditor::PlaceTile).and_then(mouse_not_over_admin_bar)))
             .add_systems(Update, place_overlay.run_if(in_state(AdminEditor::PlaceOverlay).and_then(mouse_not_over_admin_bar)))
+            .add_systems(Update, admin_choose_text_position.run_if(in_state(AdminEditor::ChooseTextPosition).and_then(mouse_not_over_admin_bar)))
+            .add_systems(Update, place_text.run_if(in_state(AdminEditor::WriteText).and_then(mouse_not_over_admin_bar)))
         ;
     }
 }
@@ -463,6 +540,15 @@ fn admin_enter_choose(
     let mut choose_buttons = Vec::new();
     spawn_image_button(&mut commands, &mut choose_buttons, first_tile_texture.clone());
     spawn_image_button(&mut commands, &mut choose_buttons, first_overlay_texture.clone());
+    let text = commands.spawn((TextBundle {
+        text: Text::from_section("T", TextStyle {
+            font_size: 48.,
+            color: Color::WHITE,
+            ..default()
+        }),
+        ..default()
+    }, Interaction::default())).id();
+    choose_buttons.push(text);
     commands.entity(ui).push_children(&choose_buttons[..]);
     ui_tracker.buttons = Some(choose_buttons);
 }
@@ -601,6 +687,46 @@ fn admin_enter_place_overlay(
     let mut overlay_textures = Vec::new();
     let overlay_texture = textures.overlay_textures.get(overlay_type).unwrap().get(overlay).unwrap();
     spawn_image_button(&mut commands, &mut overlay_textures, overlay_texture.clone());
+    commands.entity(ui).push_children(&overlay_textures[..]);
+    ui_tracker.buttons = Some(overlay_textures);
+}
+
+fn admin_enter_choose_text_position(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let mut text = Vec::new();
+    let help_text = commands.spawn(TextBundle {
+        text: Text::from_section("CHOOSE A HEX FOR THE TEXT", TextStyle {
+            font_size: 48.,
+            color: Color::WHITE,
+            ..default()
+        }),
+        ..default()
+    }).id();
+    text.push(help_text);
+    commands.entity(ui).push_children(&text[..]);
+    ui_tracker.buttons = Some(text);
+}
+
+fn admin_enter_write_text(
+    mut commands: Commands,
+    mut ui_tracker: ResMut<UITracker>,
+) {
+    let Some(ui) = ui_tracker.admin_bar else { return };
+    ui_tracker.back_button(&mut commands);
+    let mut overlay_textures = Vec::new();
+    let button = commands.spawn((TextBundle {
+        style: Style {
+            width: Val::Vh(10.),
+            height: Val::Vh(10.),
+            ..default()
+        },
+        ..default()
+    })).id();
+    overlay_textures.push(button);
     commands.entity(ui).push_children(&overlay_textures[..]);
     ui_tracker.buttons = Some(overlay_textures);
 }
