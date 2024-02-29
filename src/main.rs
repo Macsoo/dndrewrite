@@ -305,11 +305,47 @@ fn button_listener(
     }
 }
 
+enum Size {
+    Tiny,
+    Small,
+    Medium,
+    Large,
+    Huge,
+    Gargantuan,
+}
+
+struct MonsterBase {
+    name: String,
+    size: Size,
+    hp: u16,
+}
+
+enum CombatantKind {
+    Player,
+    Summon,
+    Enemy,
+    Ally,
+}
+
+struct Combatant {
+    kind: CombatantKind,
+    texture: usize,
+    summons: Vec<Entity>,
+    summoner: Option<Entity>,
+    base: Option<MonsterBase>,
+}
+
+#[derive(Resource, Default)]
+struct Party {
+    combatants: Vec<(Hex, Combatant)>,
+}
+
 #[derive(Resource, Default, Debug)]
 struct Map {
     tiles: HashMap<Hex, (Entity, String)>,
     overlay: HashMap<Hex, HashMap<String, (Entity, usize)>>,
     text: HashMap<Hex, (Entity, String)>,
+    combatants: HashMap<Hex, (Entity, Combatant)>,
 }
 
 fn place_tile(
