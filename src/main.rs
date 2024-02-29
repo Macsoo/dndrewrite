@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::render::camera::RenderTarget;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
+use bevy::render::render_asset::RenderAssetUsages;
 use bevy::sprite::MaterialMesh2dBundle;
 use bevy::utils::HashMap;
 use bevy::window::{ExitCondition, WindowFocused, WindowRef};
@@ -206,7 +207,7 @@ struct UITracker {
     chosen_tile_color: Option<String>,
     chosen_overlay_type: Option<String>,
     chosen_overlay: Option<usize>,
-    chosen_text_position: Option<Hex>,
+    chosen_text_position: Option<(Entity, Hex)>,
 }
 
 impl UITracker {
@@ -304,7 +305,7 @@ fn button_listener(
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Debug)]
 struct Map {
     tiles: HashMap<Hex, (Entity, String)>,
     overlay: HashMap<Hex, HashMap<String, (Entity, usize)>>,
@@ -403,6 +404,9 @@ fn admin_choose_text_position(
     mut ui_tracker: ResMut<UITracker>,
     windows_res: Option<Res<Windows>>,
     mut next_state: ResMut<NextState<AdminEditor>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     if !mouse_button.just_pressed(MouseButton::Left) { return }
     let Some(windows_res) = windows_res else { return };
@@ -415,7 +419,18 @@ fn admin_choose_text_position(
         let Some(cursor) = window.cursor_position() else { return };
         let Some(pos) = camera.viewport_to_world_2d(transform, cursor) else { return };
         let hex = layout.0.world_pos_to_hex(pos);
-        ui_tracker.chosen_text_position = Some(hex);
+        let pos = layout.0.hex_to_world_pos(hex);
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, layout.0.hex_corners(Hex::default()).into_iter().map(|v| [v.x, v.y, 0.]).collect::<Vec<_>>());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.2578125, 0.52734375, 0.95703125, 0.15]; 6]);
+        mesh.insert_indices(Indices::U16(vec![0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5]));
+        let id = commands.spawn(MaterialMesh2dBundle {
+            mesh: meshes.add(mesh).into(),
+            material: materials.add(ColorMaterial::default()),
+            transform: Transform::from_xyz(pos.x, pos.y, 0.),
+            ..default()
+        }).id();
+        ui_tracker.chosen_text_position = Some((id, hex));
         next_state.set(AdminEditor::WriteText);
     }
 }
@@ -429,10 +444,11 @@ fn place_text(
     mut commands: Commands,
     layout: Res<HexLayoutResource>,
     mut map: ResMut<Map>,
+    mut next: ResMut<NextState<AdminEditor>>,
 ) {
     let Some(ui_buttons) = &ui_tracker.buttons else { return };
     let Some(ui) = ui_buttons.first() else { return };
-    let Some(hex) = ui_tracker.chosen_text_position else { return };
+    let Some((chosen, hex)) = ui_tracker.chosen_text_position else { return };
     let Some(windows) = windows else { return };
     let Ok(mut text) = ui_text.get_mut(*ui) else { return };
     let Some(string) = text.sections.get_mut(0).map(|x| &mut x.value) else { return };
@@ -447,6 +463,9 @@ fn place_text(
         if let Some((id, _)) = map.text.insert(hex, (id, val)) {
             commands.entity(id).despawn_recursive();
         };
+        commands.entity(chosen).despawn_recursive();
+        ui_tracker.chosen_text_position = None;
+        next.set(AdminEditor::Choose);
         return;
     }
     if kbd.just_pressed(KeyCode::Backspace) {
@@ -720,10 +739,13 @@ fn admin_enter_write_text(
     let mut overlay_textures = Vec::new();
     let button = commands.spawn((TextBundle {
         style: Style {
-            width: Val::Vh(10.),
             height: Val::Vh(10.),
             ..default()
         },
+        text: Text::from_section("", TextStyle {
+            font_size: 48.,
+            ..default()
+        }),
         ..default()
     })).id();
     overlay_textures.push(button);
@@ -857,7 +879,9 @@ fn move_camera(
     time: Res<Time>,
     focus: Res<Focus>,
     keys: Res<ButtonInput<KeyCode>>,
+    ui_tracker: Res<UITracker>,
 ) {
+    if ui_tracker.chosen_text_position.is_some() { return }
     for (mut transform, camera) in cameras.iter_mut() {
         let RenderTarget::Window(window) = camera.target else { continue; };
         let WindowRef::Entity(entity) = window else { continue; };
