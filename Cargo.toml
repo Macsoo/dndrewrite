@@ -6,8 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = "0.13.0"
-hexx = "0.15.0"
+bevy = "0.14"
+hexx = { git = "https://github.com/ManevilleF/hexx", branch = "feat/bevy_0.14" }
+regex = "1.10"
 
 # Enable a small amount of optimization in debug mode
 [profile.dev]
