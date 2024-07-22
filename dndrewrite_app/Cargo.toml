@@ -1,0 +1,12 @@
+[package]
+name = "dndrewrite"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = "0.14"
+hexx = { git = "https://github.com/ManevilleF/hexx" }
+regex = "1.10"
+dndrewrite_macros = { path = "../dndrewrite_macros" }

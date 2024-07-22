@@ -12,7 +12,7 @@ pub fn load(
     asset_server: Res<AssetServer>,
     mut folders_loading: ResMut<resources::FoldersLoading>,
 ) {
-    let Ok(folders) = std::fs::read_dir("assets") else { panic!("No 'assets' folder.") };
+    let Ok(folders) = std::fs::read_dir("../../assets") else { panic!("No 'assets' folder.") };
     for folder in folders {
         let Ok(folder) = folder else {
             error!("IO error `{}` while loading asset folder.", folder.unwrap_err().kind());

@@ -7,6 +7,7 @@ macro_rules! id {
         Id::new(&[$($val),*])
     };
 }
+use std::fmt::Display;
 use bevy::prelude::{Deref, DerefMut};
 pub(crate) use id;
 
@@ -33,5 +34,11 @@ impl Id {
         let mut id = self.clone();
         id.pop();
         id
+    }
+}
+
+impl Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.join("/"))
     }
 }
